@@ -2,11 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:csv/csv.dart';
 import 'package:excel/excel.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'data_page.dart';
 
 const teal = Color(0xFF00A6A6);
 const tealDark = Color(0xFF006D6D);
@@ -61,22 +61,26 @@ Future<String> ask(BuildContext context, String title, String hint) async {
 
 Future<File> dataFile() async => File('${(await getApplicationDocumentsDirectory()).path}/urun_verisi.csv');
 
-// CSV kolonları: UrunKodu,UrunAdi,Renk,Beden,Ozellik1Kod,Ozellik1Ad,...,Ozellik4Ad,Barkod
-void parse(String txt) {
+// CSV/Excel kolonları: UrunKodu,UrunAdi,Renk,Beden,Ozellik1Kod,Ozellik1Ad,...,Ozellik4Ad,Barkod
+void applyRows(List<List<String>> rows) {
   byBarcode.clear();
-  txt = txt.replaceAll('\uFEFF', '');
-  final d = txt.split('\n').first.contains(';') ? ';' : ',';
-  final rows = const CsvToListConverter(shouldParseNumbers: false).convert(txt, fieldDelimiter: d, eol: '\n');
   final variants = <String, V>{};
   for (final r in rows.skip(1)) {
     if (r.length < 13) continue;
-    final s = r.map((e) => e.toString().trim()).toList();
+    final s = r.map((e) => e.trim()).toList();
     final v = variants.putIfAbsent('${s[0]}|${s[2]}|${s[3]}', () => V(s[0], s[1], s[2], s[3], s.sublist(4, 12)));
     if (s[12].isNotEmpty) {
       v.bc.add(s[12]);
       byBarcode[s[12]] = v;
     }
   }
+}
+
+void parse(String txt) {
+  txt = txt.replaceAll('\uFEFF', '');
+  final d = txt.split('\n').first.contains(';') ? ';' : ',';
+  final rows = const CsvToListConverter(shouldParseNumbers: false).convert(txt, fieldDelimiter: d, eol: '\n');
+  applyRows(rows.map((r) => r.map((e) => e.toString()).toList()).toList());
 }
 
 List<L> loadLines() {
@@ -117,14 +121,9 @@ class _HomeState extends State<Home> {
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(m)));
 
-  Future<void> importData() async {
-    final r = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['csv', 'txt']);
-    if (r?.files.single.path == null) return;
-    final bytes = await File(r!.files.single.path!).readAsBytes();
-    await (await dataFile()).writeAsBytes(bytes);
-    parse(utf8.decode(bytes, allowMalformed: true));
+  Future<void> openData() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const DataPage()));
     setState(() {});
-    snack('${byBarcode.length} barkod yüklendi');
   }
 
   Future<void> openCount() async {
@@ -167,7 +166,7 @@ class _HomeState extends State<Home> {
                 height: 56,
                 child: OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white)),
-                  onPressed: importData,
+                  onPressed: openData,
                   icon: const Icon(Icons.upload_file),
                   label: Text('Veri Yükle  (${byBarcode.length} barkod)'),
                 ),
