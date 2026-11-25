@@ -12,7 +12,7 @@ workflows:
           flutter create --platforms=android --project-name sayim_app .
           cp -r /tmp/keep/lib/. lib/
           cp /tmp/keep/pubspec.yaml pubspec.yaml
-          python3 -c "p='android/app/src/main/AndroidManifest.xml';s=open(p).read();s=s.replace('<application','<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/><application',1);open(p,'w').write(s)"
+          python3 -c "p='android/app/src/main/AndroidManifest.xml';s=open(p).read();s=s.replace('<application','<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/><uses-permission android:name=\"android.permission.INTERNET\"/><application',1);open(p,'w').write(s)"
       - name: Paketler
         script: flutter pub get
       - name: Eski paketlerin compileSdk degerini 36 yap

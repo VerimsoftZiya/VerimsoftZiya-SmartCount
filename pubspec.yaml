@@ -10,6 +10,7 @@ dependencies:
   csv: ^6.0.0
   excel: ^4.0.6
   file_picker: ^8.1.2
+  mssql_connection: any
   path_provider: ^2.1.4
   shared_preferences: ^2.3.2
 flutter:
