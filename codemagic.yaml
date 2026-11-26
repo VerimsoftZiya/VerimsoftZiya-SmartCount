@@ -23,6 +23,24 @@ workflows:
           PY
       - name: Paketler
         script: flutter pub get
+      - name: Uygulama ikonu
+        script: dart run flutter_launcher_icons
+      - name: Release ayari (R8 kodu kucultmesin)
+        script: |
+          python3 - <<'PY'
+          import os
+          for p, a, b in [
+              ('android/app/build.gradle.kts', 'signingConfig = signingConfigs.getByName("debug")',
+               'signingConfig = signingConfigs.getByName("debug")\n            isMinifyEnabled = false\n            isShrinkResources = false'),
+              ('android/app/build.gradle', 'signingConfig signingConfigs.debug',
+               'signingConfig signingConfigs.debug\n            minifyEnabled false\n            shrinkResources false'),
+          ]:
+              if os.path.exists(p):
+                  s = open(p).read()
+                  if a in s and 'isMinifyEnabled' not in s and 'minifyEnabled' not in s:
+                      open(p, 'w').write(s.replace(a, b, 1))
+                      print('R8 kapatildi:', p)
+          PY
       - name: Eski paketlerin compileSdk degerini 36 yap
         script: |
           for f in $HOME/.pub-cache/hosted/pub.dev/*/android/build.gradle*; do
