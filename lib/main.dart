@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:csv/csv.dart';
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
@@ -7,12 +8,16 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'data_page.dart';
+import 'saved_page.dart';
+import 'scan_page.dart';
+import 'settings_page.dart';
 
+const appName = 'Smart & Fast Count';
 const teal = Color(0xFF00A6A6);
 const tealDark = Color(0xFF006D6D);
 
 void main() => runApp(MaterialApp(
-      title: 'Sayım',
+      title: appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(seedColor: teal, primary: teal),
@@ -21,7 +26,7 @@ void main() => runApp(MaterialApp(
       home: const Home(),
     ));
 
-// ---------- Ortak veri ----------
+// ---------- Veri modeli ----------
 class V {
   String code, name, color, size;
   List<String> a; // Ozellik1Kod, Ozellik1Ad ... Ozellik4Ad
@@ -38,9 +43,111 @@ class L {
   factory L.fromJson(Map j) => L(j['bc'], j['dep'], j['loc'], j['q'], j['u']);
 }
 
-final Map<String, V> byBarcode = {};
-String device = '', user = '';
+Map<String, V> byBarcode = {};
+String device = '', user = '', dataPath = '';
 late SharedPreferences prefs;
+
+List<String> getDepots() => prefs.getStringList('depots') ?? List.generate(21, (i) => '07${(i + 1).toString().padLeft(2, '0')}');
+Future<void> setDepots(List<String> l) => prefs.setStringList('depots', l);
+String countMode() => prefs.getString('mode') ?? 'merge'; // merge | each
+
+// ---------- Ağır işler (arka plan isolate'ında çalışır, ekran donmaz) ----------
+const hdr = [
+  'UrunKodu', 'UrunAdi', 'Renk', 'Beden', 'Ozellik1Kod', 'Ozellik1Ad', 'Ozellik2Kod', 'Ozellik2Ad',
+  'Ozellik3Kod', 'Ozellik3Ad', 'Ozellik4Kod', 'Ozellik4Ad', 'Barkod'
+];
+
+String cellStr(CellValue? v) {
+  if (v == null) return '';
+  if (v is DoubleCellValue) {
+    final d = v.value;
+    return d == d.truncateToDouble() ? d.toInt().toString() : d.toString();
+  }
+  if (v is IntCellValue) return v.value.toString();
+  if (v is TextCellValue) return v.value.toString();
+  return v.toString();
+}
+
+List<List<String>> readTable(String path) {
+  final bytes = File(path).readAsBytesSync();
+  if (path.toLowerCase().endsWith('.xlsx')) {
+    final x = Excel.decodeBytes(bytes);
+    return x.tables.values.first.rows.map((r) => r.map((c) => cellStr(c?.value)).toList()).toList();
+  }
+  final t = utf8.decode(bytes, allowMalformed: true).replaceAll('\uFEFF', '');
+  final nl = t.indexOf('\n');
+  final d = (nl < 0 ? t : t.substring(0, nl)).contains(';') ? ';' : ',';
+  return const CsvToListConverter(shouldParseNumbers: false)
+      .convert(t, fieldDelimiter: d, eol: '\n')
+      .map((r) => r.map((e) => e.toString()).toList())
+      .toList();
+}
+
+/// Dosyayı veri deposuna işler. update=false: yeni yükleme, update=true: mevcut ürünleri günceller/yeni ekler.
+/// Bir barkod hiçbir zaman iki satırda tutulmaz. Döner: [okunan, eklenen, güncellenen, tekrar, hatalı, toplam]
+List<int> importJob(String src, String dst, bool update) {
+  final rows = readTable(src);
+  final map = <String, List<String>>{};
+  if (update && File(dst).existsSync()) {
+    for (final r in readTable(dst).skip(1)) {
+      if (r.length >= 13) map[r[12].trim()] = r;
+    }
+  }
+  int read = 0, added = 0, updated = 0, dup = 0, bad = 0;
+  final seen = <String>{};
+  for (final r0 in rows.skip(1)) {
+    if (r0.length < 13) {
+      bad++;
+      continue;
+    }
+    final r = r0.take(13).map((e) => e.trim()).toList();
+    final bc = r[12];
+    if (bc.isEmpty) {
+      bad++;
+      continue;
+    }
+    read++;
+    final first = seen.add(bc);
+    if (!first) {
+      dup++;
+      if (!update) continue; // yeni yüklemede ilk satır geçerli
+    }
+    if (map.containsKey(bc)) {
+      if (first) updated++;
+    } else {
+      added++;
+    }
+    map[bc] = r;
+  }
+  File(dst).writeAsStringSync(const ListToCsvConverter(fieldDelimiter: ';').convert([hdr, ...map.values]));
+  return [read, added, updated, dup, bad, map.length];
+}
+
+Map<String, V> loadMap(String path) {
+  final out = <String, V>{};
+  if (!File(path).existsSync()) return out;
+  final variants = <String, V>{};
+  for (final r in readTable(path).skip(1)) {
+    if (r.length < 13) continue;
+    final s = r.map((e) => e.trim()).toList();
+    final v = variants.putIfAbsent('${s[0]}|${s[2]}|${s[3]}', () => V(s[0], s[1], s[2], s[3], s.sublist(4, 12)));
+    if (s[12].isNotEmpty) {
+      v.bc.add(s[12]);
+      out[s[12]] = v;
+    }
+  }
+  return out;
+}
+
+Future<Map<String, V>> loadDataAsync() {
+  final p = dataPath;
+  return Isolate.run(() => loadMap(p));
+}
+
+Future<List<int>> importAsync(String src, bool update) {
+  final d = dataPath;
+  return Isolate.run(() => importJob(src, d, update));
+}
 
 Future<String> ask(BuildContext context, String title, String hint) async {
   final c = TextEditingController();
@@ -59,30 +166,6 @@ Future<String> ask(BuildContext context, String title, String hint) async {
   return r;
 }
 
-Future<File> dataFile() async => File('${(await getApplicationDocumentsDirectory()).path}/urun_verisi.csv');
-
-// CSV/Excel kolonları: UrunKodu,UrunAdi,Renk,Beden,Ozellik1Kod,Ozellik1Ad,...,Ozellik4Ad,Barkod
-void applyRows(List<List<String>> rows) {
-  byBarcode.clear();
-  final variants = <String, V>{};
-  for (final r in rows.skip(1)) {
-    if (r.length < 13) continue;
-    final s = r.map((e) => e.trim()).toList();
-    final v = variants.putIfAbsent('${s[0]}|${s[2]}|${s[3]}', () => V(s[0], s[1], s[2], s[3], s.sublist(4, 12)));
-    if (s[12].isNotEmpty) {
-      v.bc.add(s[12]);
-      byBarcode[s[12]] = v;
-    }
-  }
-}
-
-void parse(String txt) {
-  txt = txt.replaceAll('\uFEFF', '');
-  final d = txt.split('\n').first.contains(';') ? ';' : ',';
-  final rows = const CsvToListConverter(shouldParseNumbers: false).convert(txt, fieldDelimiter: d, eol: '\n');
-  applyRows(rows.map((r) => r.map((e) => e.toString()).toList()).toList());
-}
-
 List<L> loadLines() {
   final s = prefs.getString('lines');
   return s == null ? [] : (jsonDecode(s) as List).map((e) => L.fromJson(e)).toList();
@@ -97,6 +180,7 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   bool ready = false;
+  String status = 'Başlatılıyor...';
 
   @override
   void initState() {
@@ -106,14 +190,15 @@ class _HomeState extends State<Home> {
 
   Future<void> boot() async {
     prefs = await SharedPreferences.getInstance();
+    dataPath = '${(await getApplicationDocumentsDirectory()).path}/urun_verisi.csv';
     device = prefs.getString('device') ?? '';
     if (device.isEmpty) {
       device = await ask(context, 'Cihaz Adı', 'Bu ad sonradan DEĞİŞTİRİLEMEZ.');
       await prefs.setString('device', device);
     }
     user = await ask(context, 'Kullanıcı Adı', 'Giriş yapan kullanıcı');
-    final f = await dataFile();
-    if (await f.exists()) parse(utf8.decode(await f.readAsBytes(), allowMalformed: true));
+    setState(() => status = 'Ürün verisi yükleniyor...');
+    byBarcode = await loadDataAsync();
     setState(() => ready = true);
   }
 
@@ -121,8 +206,18 @@ class _HomeState extends State<Home> {
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(m)));
 
+  Future<void> openSaved() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const SavedPage()));
+    setState(() {});
+  }
+
   Future<void> openData() async {
     await Navigator.push(context, MaterialPageRoute(builder: (_) => const DataPage()));
+    setState(() {});
+  }
+
+  Future<void> openSettings() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsPage()));
     setState(() {});
   }
 
@@ -135,7 +230,15 @@ class _HomeState extends State<Home> {
 
   @override
   Widget build(BuildContext context) {
-    if (!ready) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (!ready) {
+      return Scaffold(
+          body: Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const CircularProgressIndicator(),
+        const SizedBox(height: 16),
+        Text(status),
+      ])));
+    }
     final open = loadLines();
     return Scaffold(
       body: Container(
@@ -145,10 +248,13 @@ class _HomeState extends State<Home> {
           child: Padding(
             padding: const EdgeInsets.all(24),
             child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              const SizedBox(height: 24),
+              Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(icon: const Icon(Icons.settings, color: Colors.white, size: 30), tooltip: 'Ayarlar', onPressed: openSettings)),
+              const SizedBox(height: 8),
               const Icon(Icons.qr_code_scanner, size: 72, color: Colors.white),
               const SizedBox(height: 8),
-              const Text('Barkodlu Sayım', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+              const Text(appName, textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               Text('Kullanıcı: $user   •   Cihaz: $device', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
               const Spacer(),
@@ -171,6 +277,16 @@ class _HomeState extends State<Home> {
                   label: Text('Veri Yükle  (${byBarcode.length} barkod)'),
                 ),
               ),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 56,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white)),
+                  onPressed: openSaved,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('Kaydedilen Sayımlar'),
+                ),
+              ),
               const Spacer(),
             ]),
           ),
@@ -189,17 +305,20 @@ class CountPage extends StatefulWidget {
 
 class _CountPageState extends State<CountPage> {
   List<L> lines = [];
-  String dep = '0701', loc = '';
+  List<String> depots = [];
+  String dep = '', loc = '', fb = '';
   bool add = true;
+  bool kb = false; // true: elle yazma (ekran klavyesi açık)
   final scanC = TextEditingController(), locC = TextEditingController();
   final scanF = FocusNode(), locF = FocusNode();
-  final depots = List.generate(21, (i) => '07${(i + 1).toString().padLeft(2, '0')}');
 
   @override
   void initState() {
     super.initState();
     lines = loadLines(); // kaldığı yerden devam
-    dep = prefs.getString('dep') ?? '0701';
+    depots = getDepots();
+    dep = prefs.getString('dep') ?? '';
+    if (!depots.contains(dep)) dep = depots.isEmpty ? '' : depots.first;
     loc = prefs.getString('loc') ?? '';
     locC.text = loc;
     WidgetsBinding.instance.addPostFrameCallback((_) => scanF.requestFocus());
@@ -215,28 +334,75 @@ class _CountPageState extends State<CountPage> {
     await prefs.setString('loc', loc);
   }
 
-  void setLoc(String v) {
-    loc = v.trim();
+  void openKb(FocusNode f) {
+    if (kb) return;
+    setState(() => kb = true);
+    f.unfocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) => f.requestFocus());
+  }
+
+  void backToScanner() {
+    setState(() => kb = false);
+    FocusManager.instance.primaryFocus?.unfocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) scanF.requestFocus();
+    });
+  }
+
+  /// Lokasyon ilk okutmada kaydedilir. Sonra farklı bir lokasyon okutulursa onay sorulur.
+  Future<void> setLoc(String raw) async {
+    final v = raw.trim();
+    if (v.isEmpty || v == loc) {
+      locC.text = loc;
+      backToScanner();
+      return;
+    }
+    if (loc.isNotEmpty) {
+      final ok = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => AlertDialog(
+                title: const Text('Lokasyon değiştirilsin mi?'),
+                content: Text('Mevcut lokasyon: $loc\nYeni lokasyon: $v\n\nLokasyonu değiştirmek istediğinize emin misiniz?'),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
+                  FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Evet')),
+                ],
+              ));
+      if (ok != true) {
+        locC.text = loc;
+        backToScanner();
+        return;
+      }
+    }
+    loc = v;
     locC.text = loc;
-    scanF.requestFocus();
-    save();
+    backToScanner();
+    await save();
     setState(() {});
   }
 
   Future<void> scan(String raw) async {
     final bc = raw.trim();
     scanC.clear();
-    scanF.requestFocus();
+    if (kb) {
+      backToScanner();
+    } else {
+      scanF.requestFocus();
+    }
     if (bc.isEmpty) return;
-    if (loc.isEmpty) return setLoc(bc); // lokasyon boşsa okutulan barkod lokasyondur
+    if (loc.isEmpty) return setLoc(bc); // lokasyon boşsa okutulan ilk barkod lokasyon olur
+    if (depots.isEmpty) return snack('Önce Ayarlar > Depo Kodları bölümünden depo ekleyin');
+    final each = countMode() == 'each'; // her okutma yeni satır
     final i = lines.indexWhere((l) => l.bc == bc && l.dep == dep && l.loc == loc);
-    if (i < 0) {
-      if (!add) return snack('Bu barkod için satır yok');
+    if (add && (i < 0 || each)) {
+      final known = lines.any((l) => l.bc == bc && l.undef);
       final l = L(bc, dep, loc, 1, !byBarcode.containsKey(bc));
       lines.insert(0, l);
+      fb = each ? '$bc  →  +1  (${lines.where((x) => x.bc == bc).length} satır)' : '$bc  →  1 adet';
       await save();
       setState(() {});
-      if (l.undef) {
+      if (l.undef && !known) {
         await showDialog(
             context: context,
             barrierDismissible: false,
@@ -254,13 +420,38 @@ class _CountPageState extends State<CountPage> {
                   ],
                 ));
       }
+    } else if (i < 0) {
+      return snack('Bu barkod için satır yok');
+    } else if (each) {
+      lines.removeAt(i);
+      fb = '$bc  →  -1';
     } else {
       final n = lines[i].q + (add ? 1 : -1);
       if (n < 0) return snack('Miktar 0\'ın altına inemez');
       lines[i].q = n;
+      fb = '$bc  →  $n adet';
     }
     HapticFeedback.lightImpact();
     await save();
+    setState(() {});
+    scanF.requestFocus();
+  }
+
+  Future<void> camLoc() async {
+    final c = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => const ScanPage(title: 'Lokasyon barkodunu okutun')));
+    if (c != null) await setLoc(c);
+  }
+
+  Future<void> camProd() async {
+    await Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => ScanPage(
+                title: 'Ürün barkodlarını okutun',
+                onCode: scan,
+                isAdd: () => add,
+                feedback: () =>
+                    'Depo $dep  •  Lokasyon: ${loc.isEmpty ? "(boş: ilk okunan lokasyon olur)" : loc}  •  ${add ? "EKLE" : "ÇIKAR"}\n$fb')));
     setState(() {});
     scanF.requestFocus();
   }
@@ -307,10 +498,30 @@ class _CountPageState extends State<CountPage> {
     if (ok != true) return;
     final path = await exportExcel();
     if (path.isEmpty) return snack('Excel yazılamadı, sayım silinmedi!');
+    await saveRecord(path);
     lines.clear();
     loc = '';
+    fb = '';
     await save();
     if (mounted) Navigator.pop(context, path);
+  }
+
+  Future<void> saveRecord(String xlsx) async {
+    final d = Directory('${(await getApplicationDocumentsDirectory()).path}/sayimlar');
+    await d.create(recursive: true);
+    final base = xlsx.split('/').last.replaceAll('.xlsx', '');
+    final rec = {
+      'ts': DateTime.now().toIso8601String(),
+      'xlsx': xlsx,
+      'user': user,
+      'device': device,
+      'deps': lines.map((l) => l.dep).toSet().join(', '),
+      'lines': lines.map((l) {
+        final v = byBarcode[l.bc];
+        return {...l.toJson(), 'n': v == null ? '' : '${v.name} ${v.color} ${v.size}'};
+      }).toList(),
+    };
+    await File('${d.path}/$base.json').writeAsString(jsonEncode(rec));
   }
 
   Future<String> exportExcel() async {
@@ -349,7 +560,7 @@ class _CountPageState extends State<CountPage> {
     }
     final n = DateTime.now();
     String p(int v) => v.toString().padLeft(2, '0');
-    final name = 'Sayim_${dep}_${n.year}${p(n.month)}${p(n.day)}_${p(n.hour)}${p(n.minute)}${p(n.second)}.xlsx';
+    final name = 'Sayim_${dep.isEmpty ? 'X' : dep}_${n.year}${p(n.month)}${p(n.day)}_${p(n.hour)}${p(n.minute)}${p(n.second)}.xlsx';
     final bytes = x.encode()!;
     for (final dir in ['/storage/emulated/0/Download', (await getExternalStorageDirectory())?.path, (await getApplicationDocumentsDirectory()).path]) {
       if (dir == null) continue;
@@ -373,32 +584,29 @@ class _CountPageState extends State<CountPage> {
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
           child: Column(children: [
-            DropdownButtonFormField<String>(
-              value: dep,
-              decoration: const InputDecoration(labelText: 'Depo Kodu', border: OutlineInputBorder(), isDense: true),
-              items: depots.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-              onChanged: (v) {
-                setState(() => dep = v!);
-                save();
-              },
-            ),
+            depots.isEmpty
+                ? const InputDecorator(
+                    decoration: InputDecoration(labelText: 'Depo Kodu', border: OutlineInputBorder(), isDense: true),
+                    child: Text('Depo yok: Ayarlar > Depo Kodları', style: TextStyle(color: Colors.red)))
+                : DropdownButtonFormField<String>(
+                    value: dep,
+                    decoration: const InputDecoration(labelText: 'Depo Kodu', border: OutlineInputBorder(), isDense: true),
+                    items: depots.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                    onChanged: (v) {
+                      setState(() => dep = v!);
+                      save();
+                    },
+                  ),
             const SizedBox(height: 8),
             TextField(
               controller: locC,
               focusNode: locF,
-              keyboardType: TextInputType.none,
+              keyboardType: kb ? TextInputType.text : TextInputType.none,
+              onTap: () => openKb(locF),
               decoration: InputDecoration(
-                  labelText: 'Lokasyon (boşken okutulan ilk barkod)',
+                  labelText: 'Lokasyon (okut / yaz / kamera)',
                   prefixIcon: const Icon(Icons.place),
-                  suffixIcon: IconButton(
-                      icon: const Icon(Icons.close),
-                      onPressed: () {
-                        loc = '';
-                        locC.clear();
-                        scanF.requestFocus();
-                        save();
-                        setState(() {});
-                      }),
+                  suffixIcon: IconButton(icon: const Icon(Icons.photo_camera), tooltip: 'Kamera ile okut', onPressed: camLoc),
                   border: const OutlineInputBorder(),
                   isDense: true),
               onSubmitted: setLoc,
@@ -422,9 +630,14 @@ class _CountPageState extends State<CountPage> {
             TextField(
               controller: scanC,
               focusNode: scanF,
-              keyboardType: TextInputType.none,
-              decoration: const InputDecoration(
-                  labelText: 'Ürün barkodu okutun', prefixIcon: Icon(Icons.qr_code_scanner), border: OutlineInputBorder(), isDense: true),
+              keyboardType: kb ? TextInputType.text : TextInputType.none,
+              onTap: () => openKb(scanF),
+              decoration: InputDecoration(
+                  labelText: 'Ürün barkodu (okut / yaz / kamera)',
+                  prefixIcon: const Icon(Icons.qr_code_scanner),
+                  suffixIcon: IconButton(icon: const Icon(Icons.photo_camera), tooltip: 'Kamera ile okut', onPressed: camProd),
+                  border: const OutlineInputBorder(),
+                  isDense: true),
               onSubmitted: scan,
             ),
           ]),

@@ -1,19 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:csv/csv.dart';
-import 'package:excel/excel.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:mssql_connection/mssql_connection.dart';
 import 'package:path_provider/path_provider.dart';
 import 'main.dart';
 
 const spName = 'dbo.sp_SayimUrunVerisi';
-const header = [
-  'UrunKodu', 'UrunAdi', 'Renk', 'Beden',
-  'Ozellik1Kod', 'Ozellik1Ad', 'Ozellik2Kod', 'Ozellik2Ad',
-  'Ozellik3Kod', 'Ozellik3Ad', 'Ozellik4Kod', 'Ozellik4Ad', 'Barkod'
-];
 
 const spScript = r'''
 -- =====================================================
@@ -65,10 +58,40 @@ class DataPage extends StatefulWidget {
 
 class _DataPageState extends State<DataPage> {
   bool busy = false;
+  String status = '';
+  final sw = Stopwatch();
+  Timer? timer;
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  void startBusy(String s) {
+    status = s;
+    sw
+      ..reset()
+      ..start();
+    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+    setState(() => busy = true);
+  }
+
+  void stopBusy() {
+    timer?.cancel();
+    sw.stop();
+    if (mounted) setState(() => busy = false);
+  }
 
   void msg(String m) => ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(m), duration: const Duration(seconds: 6)));
+
+  Future<void> info(String title, String text) => showDialog(
+      context: context,
+      builder: (_) => AlertDialog(title: Text(title), content: Text(text), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Tamam'))]));
 
   Future<String> saveFile(String name, List<int> bytes) async {
     for (final dir in ['/storage/emulated/0/Download', (await getExternalStorageDirectory())?.path, (await getApplicationDocumentsDirectory()).path]) {
@@ -87,98 +110,75 @@ class _DataPageState extends State<DataPage> {
     msg(p.isEmpty ? 'Dosya yazılamadı' : 'Kaydedildi: $p\nBilgisayara kopyalayıp SSMS ile açın.');
   }
 
-  String cs(CellValue? v) {
-    if (v == null) return '';
-    if (v is DoubleCellValue) {
-      final d = v.value;
-      return d == d.truncateToDouble() ? d.toInt().toString() : d.toString();
-    }
-    if (v is IntCellValue) return v.value.toString();
-    if (v is TextCellValue) return v.value.toString();
-    return v.toString();
-  }
-
-  Future<void> finishLoad(List<List<String>> rows) async {
-    await (await dataFile()).writeAsString(const ListToCsvConverter(fieldDelimiter: ';').convert(rows));
-    applyRows(rows);
-    setState(() {});
-    msg('${byBarcode.length} barkod yüklendi');
-  }
-
-  Future<void> fromFile() async {
-    final r = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['xlsx', 'csv', 'txt']);
-    final path = r?.files.single.path;
-    if (path == null) return;
-    setState(() => busy = true);
-    try {
-      final bytes = await File(path).readAsBytes();
-      List<List<String>> rows;
-      if (path.toLowerCase().endsWith('.xlsx')) {
-        final x = Excel.decodeBytes(bytes);
-        rows = x.tables.values.first.rows.map((r) => r.map((c) => cs(c?.value)).toList()).toList();
-      } else {
-        var t = utf8.decode(bytes, allowMalformed: true).replaceAll('\uFEFF', '');
-        final d = t.split('\n').first.contains(';') ? ';' : ',';
-        rows = const CsvToListConverter(shouldParseNumbers: false)
-            .convert(t, fieldDelimiter: d, eol: '\n')
-            .map((r) => r.map((e) => e.toString()).toList())
-            .toList();
-      }
-      await finishLoad(rows);
-    } catch (e) {
-      msg('Dosya okunamadı: $e');
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
-  Future<void> fromDb() async {
-    final keys = ['ip', 'port', 'db', 'user', 'pw'];
-    final labels = {'ip': 'Sunucu IP', 'port': 'Port', 'db': 'Veritabanı adı', 'user': 'Kullanıcı', 'pw': 'Şifre'};
-    final c = {for (final k in keys) k: TextEditingController(text: k == 'pw' ? '' : (prefs.getString('db_$k') ?? (k == 'port' ? '1433' : '')))};
+  // 1) Verileri Temizle
+  Future<void> clearData() async {
+    if (byBarcode.isEmpty) return msg('Silinecek veri yok');
+    final y = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+              title: const Text('Verileri Temizle'),
+              content: Text('Yüklenmiş tüm ürün bilgileri (${byBarcode.length} barkod) silinecek.\n\nSilmek istediğinize emin misiniz?'),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Hayır')),
+                FilledButton(style: FilledButton.styleFrom(backgroundColor: Colors.red), onPressed: () => Navigator.pop(context, true), child: const Text('Evet')),
+              ],
+            ));
+    if (y != true) return; // Hayır: bu ekranda kal
+    final c = TextEditingController();
     final ok = await showDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
-              title: const Text('Veritabanı Bağlantısı'),
-              content: SingleChildScrollView(
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                for (final k in keys)
-                  TextField(controller: c[k], obscureText: k == 'pw', decoration: InputDecoration(labelText: labels[k])),
-              ])),
+              title: const Text('Son Onay'),
+              content: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text("Silmek için SİL yazın ve Tamam'a basın."),
+                TextField(controller: c, autofocus: true, textCapitalization: TextCapitalization.characters),
+              ]),
               actions: [
                 TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
-                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Veriyi Çek')),
+                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Tamam')),
               ],
             ));
     if (ok != true) return;
-    for (final k in ['ip', 'port', 'db', 'user']) {
-      await prefs.setString('db_$k', c[k]!.text.trim());
-    }
-    setState(() => busy = true);
+    final t = c.text.trim().toUpperCase();
+    if (t != 'SİL' && t != 'SIL') return msg('Yanlış yazdınız, veriler silinmedi');
     try {
-      final conn = MssqlConnection.getInstance();
-      final connected = await conn.connect(
-          ip: c['ip']!.text.trim(),
-          port: c['port']!.text.trim(),
-          databaseName: c['db']!.text.trim(),
-          username: c['user']!.text.trim(),
-          password: c['pw']!.text,
-          timeoutInSeconds: 20);
-      if (!connected) throw 'Bağlantı kurulamadı';
-      final res = await conn.getData('EXEC $spName');
-      await conn.disconnect();
-      final list = jsonDecode(res) as List;
-      if (list.isEmpty) throw 'Sorgu sonuç döndürmedi (SP oluşturuldu mu?)';
-      final rows = [header, ...list.map((m) => header.map((h) => '${(m as Map)[h] ?? ''}').toList())];
-      await finishLoad(rows);
+      final f = File(dataPath);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    byBarcode = {};
+    setState(() {});
+    msg('Tüm ürün verileri silindi');
+  }
+
+  // 2) Verileri Yükle (update=false)  /  3) Verileri Güncelle (update=true)
+  Future<void> importData(bool update) async {
+    if (!update && byBarcode.isNotEmpty) {
+      return info('Veri zaten yüklü',
+          'Verileri Yükle mevcut veriyi güncellemez.\n\nMevcut ürünleri güncellemek için "Verileri Güncelle" düğmesini kullanın ya da önce "Verileri Temizle" ile silin.');
+    }
+    if (update && byBarcode.isEmpty) return info('Güncellenecek veri yok', 'Önce "Verileri Yükle" ile ürün verisini yükleyin.');
+    final r = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['xlsx', 'csv', 'txt']);
+    final path = r?.files.single.path;
+    if (path == null) return;
+    final isX = path.toLowerCase().endsWith('.xlsx');
+    startBusy(isX
+        ? 'Excel dosyası okunuyor...\nBüyük dosyalarda (100 bin+ satır) bu işlem dakikalar sürebilir. CSV çok daha hızlıdır.'
+        : 'Dosya okunuyor ve kaydediliyor...');
+    try {
+      final st = await importAsync(path, update);
+      status = 'Veriler belleğe alınıyor...';
+      if (mounted) setState(() {});
+      byBarcode = await loadDataAsync();
+      stopBusy();
+      await info(update ? 'Güncelleme tamamlandı' : 'Yükleme tamamlandı',
+          'Dosyadaki geçerli satır: ${st[0]}\nEklenen: ${st[1]}\nGüncellenen: ${st[2]}\nTekrar eden barkod: ${st[3]}${update ? ' (son satır geçerli)' : ' (ilk satır geçerli)'}\nHatalı/boş barkodlu satır: ${st[4]}\n\nToplam barkod: ${st[5]}');
     } catch (e) {
+      stopBusy();
       msg('Hata: $e');
-    } finally {
-      if (mounted) setState(() => busy = false);
     }
   }
 
-  Widget step(int n, String title, String text, [Widget? action]) => Card(
+  Widget step(int n, String title, String text, Widget action) => Card(
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -189,7 +189,8 @@ class _DataPageState extends State<DataPage> {
               Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
               const SizedBox(height: 4),
               Text(text),
-              if (action != null) ...[const SizedBox(height: 8), action],
+              const SizedBox(height: 8),
+              action,
             ])),
           ]),
         ),
@@ -201,25 +202,56 @@ class _DataPageState extends State<DataPage> {
       appBar: AppBar(title: const Text('Veri Yükle')),
       body: Stack(children: [
         ListView(padding: const EdgeInsets.all(12), children: [
-          Text('Yüklü veri: ${byBarcode.length} barkod', style: const TextStyle(fontWeight: FontWeight.bold, color: tealDark)),
+          Text('Yüklü veri: ${byBarcode.length} barkod', style: const TextStyle(fontWeight: FontWeight.bold, color: tealDark, fontSize: 16)),
           const SizedBox(height: 8),
-          step(1, 'SP script\'ini indirin', 'Aşağıdaki düğme, veritabanında oluşturulacak stored procedure\'ü .txt olarak cihazın Download klasörüne kaydeder. Dosyayı bilgisayarınıza kopyalayın.',
-              FilledButton.icon(onPressed: downloadSp, icon: const Icon(Icons.download), label: const Text('SP Script\'ini İndir (.txt)'))),
-          step(2, 'SP\'yi veritabanında oluşturun', 'SQL Server Management Studio\'da Nebim V3 veritabanını seçin, .txt içeriğini yeni sorgu penceresine yapıştırıp çalıştırın (F5). Bu işlem bir kez yapılır.'),
-          step(3, 'Veriyi alın', 'Seçenek A: SSMS\'te  EXEC $spName  çalıştırın, sonucu Excel veya CSV olarak kaydedip cihaza kopyalayın.\nSeçenek B: Cihaz sunucuyla aynı ağdaysa doğrudan veritabanından çekin.'),
+          Card(
+            color: const Color(0xFFE6F7F7),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Hazırlık: Excel/CSV dosyasını oluşturma', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                const Text('1) Aşağıdaki düğmeyle SP script\'ini (.txt) indirip bilgisayara kopyalayın.\n2) SSMS\'te Nebim V3 veritabanında çalıştırın (bir kez).\n3) EXEC dbo.sp_SayimUrunVerisi sonucunu CSV (önerilir) veya Excel olarak kaydedip cihaza kopyalayın.'),
+                const SizedBox(height: 8),
+                FilledButton.tonalIcon(onPressed: downloadSp, icon: const Icon(Icons.download), label: const Text('SP Script\'ini İndir (.txt)')),
+              ]),
+            ),
+          ),
+          step(1, 'Verileri Temizle', 'Yüklenmiş tüm ürün bilgilerini siler. İki aşamalı onay istenir.',
+              OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                  onPressed: busy ? null : clearData,
+                  icon: const Icon(Icons.delete_forever),
+                  label: const Text('Verileri Temizle'))),
+          step(2, 'Verileri Yükle', 'Excel/CSV ile ilk yüklemeyi yapar. Daha önce veri yüklendiyse güncellemez. Bir barkod iki kez tanımlanamaz.',
+              FilledButton.icon(onPressed: busy ? null : () => importData(false), icon: const Icon(Icons.table_chart), label: const Text('Verileri Yükle'))),
+          step(3, 'Verileri Güncelle', 'Var olan ürün bilgilerini günceller, dosyadaki yeni barkodları ekler. Bir barkod asla iki satırda bulunmaz.',
+              FilledButton.tonalIcon(onPressed: busy ? null : () => importData(true), icon: const Icon(Icons.sync), label: const Text('Verileri Güncelle'))),
           const SizedBox(height: 8),
-          SizedBox(
-              height: 56,
-              child: FilledButton.icon(onPressed: busy ? null : fromFile, icon: const Icon(Icons.table_chart), label: const Text('Excel / CSV ile Veri Yükle'))),
-          const SizedBox(height: 12),
-          SizedBox(
-              height: 56,
-              child: FilledButton.tonalIcon(onPressed: busy ? null : fromDb, icon: const Icon(Icons.storage), label: const Text('Database\'den Veri Çek'))),
-          const SizedBox(height: 12),
-          const Text('Excel/CSV ilk satırı başlık olmalı; kolonlar sırayla: UrunKodu, UrunAdi, Renk, Beden, Ozellik1Kod … Ozellik4Ad, Barkod.',
+          const Text('Dosya ilk satırı başlık olmalı; kolonlar sırayla: UrunKodu, UrunAdi, Renk, Beden, Ozellik1Kod … Ozellik4Ad, Barkod.',
               style: TextStyle(fontSize: 12, color: Colors.black54)),
         ]),
-        if (busy) Container(color: Colors.black26, child: const Center(child: CircularProgressIndicator())),
+        if (busy)
+          Container(
+            color: Colors.black45,
+            child: Center(
+              child: Card(
+                margin: const EdgeInsets.all(24),
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 16),
+                    Text(status, textAlign: TextAlign.center),
+                    const SizedBox(height: 8),
+                    Text('Geçen süre: ${sw.elapsed.inSeconds} sn', style: const TextStyle(color: Colors.black54)),
+                    const SizedBox(height: 4),
+                    const Text('Lütfen uygulamayı kapatmayın.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+                  ]),
+                ),
+              ),
+            ),
+          ),
       ]),
     );
   }
