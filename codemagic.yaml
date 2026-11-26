@@ -1,7 +1,7 @@
 workflows:
   android-apk:
-    name: Android APK
-    instance_type: mac_mini_m2
+    name: FastCount Android APK
+    instance_type: linux_x2
     max_build_duration: 30
     environment:
       flutter: stable
@@ -9,10 +9,18 @@ workflows:
       - name: Android iskeletini olustur
         script: |
           mkdir -p /tmp/keep && cp -r lib pubspec.yaml /tmp/keep/
-          flutter create --platforms=android --project-name sayim_app .
+          flutter create --platforms=android --org com.verimsoft --project-name fastcount .
           cp -r /tmp/keep/lib/. lib/
           cp /tmp/keep/pubspec.yaml pubspec.yaml
-          python3 -c "p='android/app/src/main/AndroidManifest.xml';s=open(p).read();s=s.replace('<application','<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/><uses-permission android:name=\"android.permission.INTERNET\"/><application',1);open(p,'w').write(s)"
+          python3 - <<'PY'
+          import re
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p).read()
+          perms = ''.join('<uses-permission android:name="android.permission.%s"/>' % x for x in ['WRITE_EXTERNAL_STORAGE', 'CAMERA'])
+          s = s.replace('<application', perms + '<application', 1)
+          s = re.sub(r'android:label="[^"]*"', 'android:label="FastCount"', s, count=1)
+          open(p, 'w').write(s)
+          PY
       - name: Paketler
         script: flutter pub get
       - name: Eski paketlerin compileSdk degerini 36 yap
@@ -20,7 +28,6 @@ workflows:
           for f in $HOME/.pub-cache/hosted/pub.dev/*/android/build.gradle*; do
             sed -i.bak -E 's/compileSdk(Version)?[[:space:]]*=?[[:space:]]*[0-9]+/compileSdk = 36/' "$f"
           done
-          grep -rn "compileSdk" $HOME/.pub-cache/hosted/pub.dev/file_picker-*/android/build.gradle* || true
       - name: APK derle
         script: flutter build apk --release
     artifacts:

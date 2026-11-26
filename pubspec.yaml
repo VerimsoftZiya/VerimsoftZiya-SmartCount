@@ -1,5 +1,5 @@
-name: sayim_app
-description: Barkodlu sayim uygulamasi
+name: fastcount
+description: "Smart & Fast Count - barkodlu offline sayim uygulamasi"
 publish_to: none
 version: 1.0.0+1
 environment:
@@ -10,7 +10,7 @@ dependencies:
   csv: ^6.0.0
   excel: ^4.0.6
   file_picker: ^8.1.2
-  mssql_connection: any
+  mobile_scanner: ^5.2.3
   path_provider: ^2.1.4
   shared_preferences: ^2.3.2
 flutter:
