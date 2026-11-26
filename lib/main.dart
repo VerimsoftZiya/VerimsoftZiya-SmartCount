@@ -252,7 +252,7 @@ class _HomeState extends State<Home> {
                   alignment: Alignment.centerRight,
                   child: IconButton(icon: const Icon(Icons.settings, color: Colors.white, size: 30), tooltip: 'Ayarlar', onPressed: openSettings)),
               const SizedBox(height: 8),
-              const Icon(Icons.qr_code_scanner, size: 72, color: Colors.white),
+              Center(child: Image.asset('assets/logo.png', height: 150)),
               const SizedBox(height: 8),
               const Text(appName, textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
@@ -391,7 +391,7 @@ class _CountPageState extends State<CountPage> {
       scanF.requestFocus();
     }
     if (bc.isEmpty) return;
-    if (loc.isEmpty) return setLoc(bc); // lokasyon boşsa okutulan ilk barkod lokasyon olur
+    if (loc.isEmpty) return snack('Önce lokasyonu okutun (Lokasyon alanı)');
     if (depots.isEmpty) return snack('Önce Ayarlar > Depo Kodları bölümünden depo ekleyin');
     final each = countMode() == 'each'; // her okutma yeni satır
     final i = lines.indexWhere((l) => l.bc == bc && l.dep == dep && l.loc == loc);
@@ -443,6 +443,8 @@ class _CountPageState extends State<CountPage> {
   }
 
   Future<void> camProd() async {
+    if (loc.isEmpty) return snack('Önce lokasyonu okutun (Lokasyon alanındaki kamera düğmesi)');
+    if (depots.isEmpty) return snack('Önce Ayarlar > Depo Kodları bölümünden depo ekleyin');
     await Navigator.push(
         context,
         MaterialPageRoute(
@@ -451,7 +453,7 @@ class _CountPageState extends State<CountPage> {
                 onCode: scan,
                 isAdd: () => add,
                 feedback: () =>
-                    'Depo $dep  •  Lokasyon: ${loc.isEmpty ? "(boş: ilk okunan lokasyon olur)" : loc}  •  ${add ? "EKLE" : "ÇIKAR"}\n$fb')));
+                    'Depo $dep  •  Lokasyon: $loc  •  ${add ? "EKLE" : "ÇIKAR"}\n$fb')));
     setState(() {});
     scanF.requestFocus();
   }

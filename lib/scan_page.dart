@@ -89,7 +89,30 @@ class _ScanPageState extends State<ScanPage> {
         actions: [IconButton(icon: const Icon(Icons.flash_on), onPressed: () => ctrl.toggleTorch())],
       ),
       body: Stack(children: [
-        MobileScanner(controller: ctrl, onDetect: onDetect),
+        MobileScanner(
+          controller: ctrl,
+          onDetect: onDetect,
+          errorBuilder: (context, error, child) {
+            final denied = error.errorCode == MobileScannerErrorCode.permissionDenied;
+            return Container(
+              color: Colors.black,
+              padding: const EdgeInsets.all(24),
+              alignment: Alignment.center,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.error_outline, color: Colors.white, size: 48),
+                const SizedBox(height: 12),
+                Text(
+                    denied
+                        ? 'Kamera izni verilmemiş.\n\nTelefon Ayarları > Uygulamalar > FastCount > İzinler > Kamera > "Uygulama kullanılırken izin ver"'
+                        : 'Kamera açılamadı\nKod: ${error.errorCode.name}\n${error.errorDetails?.message ?? ''}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 15)),
+                const SizedBox(height: 16),
+                FilledButton(onPressed: () => ctrl.start(), child: const Text('Tekrar Dene')),
+              ]),
+            );
+          },
+        ),
         Center(
           child: Container(
             width: 260,
